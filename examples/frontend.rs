@@ -5,7 +5,7 @@
 // This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(plugin)]
+#![feature(plugin, custom_derive)]
 #![plugin(rocket_codegen)]
 
 extern crate futures;
@@ -252,7 +252,6 @@ fn what_service_report(
 // Note, the docs warn "data: Vec<u8>" is a DDoS vector - https://api.rocket.rs/rocket/data/trait.FromData.html
 // since this is a research-first implementation, i will abstain from doing this perfectly now and
 // run with the slurp.
-
 #[post("/entry/<service_name>/<entry_id>", data = "<data>")]
 fn entry_fetch(
   service_name: String,
@@ -336,6 +335,44 @@ fn entry_fetch(
                            // service_name, entry_id)))
   } else {
     NamedFile::open(&zip_path).map_err(|_| Redirect::to("/"))
+  }
+}
+
+#[derive(FromForm)]
+struct PreviewForm {
+  captcha: String,
+}
+
+/// Rocket is awfully explicit from what I can tell - need an explicit mount point for the
+/// no-query-param get request?
+#[get("/preview/<service_name>/<corpus_name>/<entry_name>")]
+fn entry_preview_page_noparams(
+  service_name: String,
+  corpus_name: String,
+  entry_name: String,
+) -> Result<Template, Redirect>
+{
+  Err(Redirect::to("/preview/captcha"))
+}
+
+/// Intended for easy access to individual results when the naming scheme allows it.
+/// For example, if you register the `arxiv` and know your paper has id `1404.6548`
+/// you can preview its HTML conversion at
+///   `/preview/tex_to_html/arxiv/1404.6548`
+#[get("/preview/<service_name>/<corpus_name>/<entry_name>?<preview_form>")]
+fn entry_preview_page(
+  service_name: String,
+  corpus_name: String,
+  entry_name: String,
+  preview_form: Option<PreviewForm>,
+) -> Result<Template, Redirect>
+{
+  if let Some(form) = preview_form {
+    println!("Captcha: {}", form.captcha);
+    Err(Redirect::to("/"))
+  } else {
+    println!("Preview requested, asking for captcha fill");
+    Err(Redirect::to("/preview/captcha"))
   }
 }
 
@@ -434,6 +471,8 @@ fn rocket() -> rocket::Rocket {
         category_service_report,
         what_service_report,
         entry_fetch,
+        entry_preview_page_noparams,
+        entry_preview_page,
         rerun_corpus,
         rerun_severity,
         rerun_category,
