@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta http-equiv="Content-Type" content="text/html" />
+    <meta charset="utf-8" />
+    <title> Please verify you're human | CorTeX</title>
+
+    <!-- Sprinkle some jQuery : -->
+    <script src='https://code.jquery.com/jquery-2.1.4.min.js'></script>
+    <!-- Bootstrap, the modern mother of all design: -->
+    <!-- Latest compiled and minified CSS -->
+    <link rel='stylesheet' type='text/css' href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.1/css/bootstrap.min.css">
+    <!-- Optional theme -->
+    <link rel='stylesheet' type='text/css' href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.1/css/bootstrap-theme.min.css">
+    <!-- Latest compiled and minified JavaScript -->
+    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.1/js/bootstrap.min.js"></script>
+    <!-- And some Awesome Font sauce: -->
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.4.0/css/font-awesome.min.css">
+    <!-- Robot slab font: -->
+    <link rel='stylesheet' type='text/css' href='http://fonts.googleapis.com/css?family=Roboto+Slab:400,700'>
+
+    <link rel="stylesheet" type='text/css' href='/public/css/cortex.css'>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+
+    <meta name="language" content="English">
+    <meta name="description" content="ReCaptcha verification for previewing an entry in CorTeX">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+</head>
+
+<body>
+
+    <div id="modal-get-entry" class="modal fade" tabindex="-1" role="dialog">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <form id="form-get-entry" class="form-get-entry" name="form-get-entry" method="post" accept-charset="UTF-8" action="">
+                    <div class="modal-header">
+                        <a class="close" data-dismiss="modal">×</a>
+                        <h3>Are you human?</h3>
+                    </div>
+                    <div class="modal-body">
+                        <div style="text-align: left; margin-bottom: 10px;">
+                            <p>By proceeding to a download you:</p>
+                            <ol>
+                                <li>Agree to a
+                                    <strong>temporary preview</strong> of the implied data sample,</li>
+                                <li>Agree that this download is intended and authorized only for
+                                    <strong>research use</strong>,</li>
+                                <li>Agree to
+                                    <strong>purging all local copies</strong> of the data at the immediate end of the research experiment,</li>
+                                <li>Agree to protecting the
+                                    <strong>original copyright</strong> of all implied data,</li>
+                                <li>Agree to
+                                    <strong>provide attribution</strong> as appropriate.</li>
+                            </ol>
+                            <br>
+                        </div>
+                        <center>
+                            <div class="g-recaptcha" data-sitekey="6LdEehITAAAAAG81QWBR7rTGxz5Rk7-FjwR7so_F"></div>
+                        </center>
+                    </div>
+                    <div class="modal-footer">
+                        <input class="btn btn-success" type="submit" value="Submit" id="btn-get-entry">
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src='https://www.google.com/recaptcha/api.js'></script>
+    <script>
+        $("document").ready(function (e) {
+            var cached_captcha = localStorage.getItem("g_recaptcha_response");
+            if (cached_captcha) {
+                var new_quota = localStorage.getItem("g_recaptcha_quota") - 1;
+                console.log("quota: ", new_quota);
+                if (new_quota > 0) {
+                    localStorage.setItem("g_recaptcha_quota", new_quota);
+                    // Redirect to the qualified page
+                    window.location.replace(window.location.pathname + "?captcha=" + cached_captcha);
+                } else {
+                    // Quota expired, reseting
+                    localStorage.removeItem("g_recaptcha_response");
+                    localStorage.removeItem("g_recaptcha_quota");
+                    $("#modal-get-entry").modal("show");
+                }
+            } else {
+                $("#modal-get-entry").modal("show");
+            }
+        });
+
+        $("#form-get-entry").submit(function (e) {
+            e.preventDefault();
+            var $form = $(this);
+            // Record the captcha key, which gets another 1 free uses
+            var g_recaptcha_response = $("#g-recaptcha-response").val();
+            if (g_recaptcha_response) {
+                console.log("SETTING localStorage with ", g_recaptcha_response);
+                localStorage.setItem("g_recaptcha_response", g_recaptcha_response);
+                localStorage.setItem("g_recaptcha_quota", 19);
+                // Redirect to the qualified page
+                console.log("AT: ", window.location.pathname);
+                window.location.replace(window.location.pathname + "?captcha=" + g_recaptcha_response);
+            } else {
+                // Something is wrong, you shouldn't have landed on the page if you had the cache set, reload
+                location.reload();
+            }
+        });
+    </script>
+
+</body>
+
+</html>

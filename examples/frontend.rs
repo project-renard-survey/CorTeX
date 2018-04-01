@@ -27,7 +27,7 @@ extern crate regex;
 extern crate time;
 
 use rocket::response::{NamedFile, Redirect};
-use rocket::response::status::{Accepted, NotFound};
+use rocket::response::status::{Accepted, BadRequest, NotFound};
 use rocket_contrib::Template;
 use futures::{Future, Stream};
 use tokio_core::reactor::Core;
@@ -259,60 +259,8 @@ fn entry_fetch(
   data: Vec<u8>,
 ) -> Result<NamedFile, Redirect>
 {
-  // Any secrets reside in examples/config.json
-  let cortex_config = aux_load_config();
-
-  let g_recaptcha_response = if data.len() > 21 {
-    str::from_utf8(&data[21..]).unwrap_or(UNKNOWN)
-  } else {
-    UNKNOWN
-  };
-  // Check if we hve the g_recaptcha_response in Redis, then reuse
-  let redis_opt;
-  let quota: usize = match redis::Client::open("redis://127.0.0.1/") {
-    Err(_) => {return Err(Redirect::to("/"))}// TODO: Err(NotFound(format!("redis unreachable")))},
-    Ok(redis_client) => match redis_client.get_connection() {
-      Err(_) => {return Err(Redirect::to("/"))}//TODO: Err(NotFound(format!("redis unreachable")))},
-      Ok(redis_connection) => {
-        let quota = redis_connection.get(g_recaptcha_response).unwrap_or(0);
-        redis_opt = Some(redis_connection);
-        quota
-      }
-    }
-  };
-
-  let captcha_verified = if quota > 0 {
-    if quota == 1 {
-      match redis_opt {
-        Some(ref redis_connection) => {
-          // Remove if last
-          redis_connection.del(g_recaptcha_response).unwrap_or(());
-          // We have quota available, decrement it
-          redis_connection
-            .set(g_recaptcha_response, quota - 1)
-            .unwrap_or(());
-        },
-        None => {}, // compatibility mode: redis has ran away?
-      };
-    }
-    // And allow operation
-    true
-  } else {
-    let check_val = aux_check_captcha(g_recaptcha_response, &cortex_config.captcha_secret);
-    if check_val {
-      match &redis_opt {
-        &Some(ref redis_connection) => {
-          // Add a reuse quota if things check out, 19 more downloads
-          redis_connection.set(g_recaptcha_response, 19).unwrap_or(());
-        },
-        &None => {},
-      };
-    }
-    check_val
-  };
-
   // If you are not human, you have no business here.
-  if !captcha_verified {
+  if !is_valid_captcha(&data[21..]).unwrap_or(false) {
     return Err(Redirect::to(&format!(
       "/entry/{:?}/{:?}?expire_quotas",
       service_name, entry_id
@@ -346,13 +294,16 @@ struct PreviewForm {
 /// Rocket is awfully explicit from what I can tell - need an explicit mount point for the
 /// no-query-param get request?
 #[get("/preview/<service_name>/<corpus_name>/<entry_name>")]
-fn entry_preview_page_noparams(
+fn preview_entry_page_guard(
   service_name: String,
   corpus_name: String,
   entry_name: String,
 ) -> Result<Template, Redirect>
 {
-  Err(Redirect::to("/preview/captcha"))
+  Ok(Template::render(
+    "cortex-captcha-standalone",
+    TemplateContext::default(),
+  ))
 }
 
 /// Intended for easy access to individual results when the naming scheme allows it.
@@ -360,10 +311,40 @@ fn entry_preview_page_noparams(
 /// you can preview its HTML conversion at
 ///   `/preview/tex_to_html/arxiv/1404.6548`
 #[get("/preview/<service_name>/<corpus_name>/<entry_name>?<preview_form>")]
-fn entry_preview_page(
+fn preview_entry_page(
   service_name: String,
   corpus_name: String,
   entry_name: String,
+  preview_form: PreviewForm,
+) -> Result<Template, Redirect>
+{
+  println!("CAPTCHA: {}", preview_form.captcha);
+  if is_valid_captcha(preview_form.captcha.as_bytes()).unwrap_or(false) {
+    let cache_key = format!("preview:{}:{}:{}", service_name, corpus_name, entry_name);
+    let rendered_content = match aux_redis_get(&cache_key) {
+      Some(content) => content,
+      None => {
+        let content = aux_render_preview(&service_name, &corpus_name, &entry_name);
+        if let Err(_) = aux_redis_set(&cache_key, &content) {
+          return Err(Redirect::to("/error/500"));
+        }
+        content
+      },
+    };
+    Err(Redirect::to("/todo"))
+  } else {
+    Err(Redirect::to(&format!(
+      "/preview/{}/{}/{}",
+      service_name, corpus_name, entry_name
+    )))
+  }
+}
+
+/// More convenient for the automatic report pages, preview a task by its DB id
+#[get("/preview/<service_name>/<entry_id>?<preview_form>")]
+fn preview_entry_id_page(
+  service_name: String,
+  entry_id: usize,
   preview_form: Option<PreviewForm>,
 ) -> Result<Template, Redirect>
 {
@@ -471,8 +452,9 @@ fn rocket() -> rocket::Rocket {
         category_service_report,
         what_service_report,
         entry_fetch,
-        entry_preview_page_noparams,
-        entry_preview_page,
+        preview_entry_page_guard,
+        preview_entry_page,
+        preview_entry_id_page,
         rerun_corpus,
         rerun_severity,
         rerun_category,
@@ -790,7 +772,70 @@ struct IsSuccess {
   success: bool,
 }
 
-fn aux_check_captcha(g_recaptcha_response: &str, captcha_secret: &str) -> bool {
+fn is_valid_captcha(captcha_bytes: &[u8]) -> Result<bool, BadRequest<String>> {
+  let g_recaptcha_response = if captcha_bytes.len() > 21 {
+    str::from_utf8(captcha_bytes).unwrap_or(UNKNOWN)
+  } else {
+    UNKNOWN
+  };
+  // Check if we hve the g_recaptcha_response in Redis, then reuse
+  let redis_opt;
+  let quota: usize = match redis::Client::open("redis://127.0.0.1/") {
+    Err(_) => {
+      return Err(BadRequest(Some(format!(
+        "local Redis cache server is unreachable"
+      ))))
+    },
+    Ok(redis_client) => match redis_client.get_connection() {
+      Err(_) => {
+        return Err(BadRequest(Some(format!(
+          "local Redis cache server is unreachable"
+        ))))
+      },
+      Ok(redis_connection) => {
+        let quota = redis_connection.get(g_recaptcha_response).unwrap_or(0);
+        redis_opt = Some(redis_connection);
+        quota
+      },
+    },
+  };
+
+  if quota > 0 {
+    if quota == 1 {
+      match redis_opt {
+        Some(ref redis_connection) => {
+          // Remove if last
+          redis_connection.del(g_recaptcha_response).unwrap_or(());
+          // We have quota available, decrement it
+          redis_connection
+            .set(g_recaptcha_response, quota - 1)
+            .unwrap_or(());
+        },
+        None => {}, // compatibility mode: redis has ran away?
+      };
+    }
+    // And allow operation
+    Ok(true)
+  } else {
+    if aux_check_captcha(g_recaptcha_response) {
+      match &redis_opt {
+        &Some(ref redis_connection) => {
+          // Add a reuse quota if things check out, 19 more downloads
+          redis_connection.set(g_recaptcha_response, 19).unwrap_or(());
+        },
+        &None => {},
+      };
+      Ok(true)
+    } else {
+      Ok(false)
+    }
+  }
+}
+
+fn aux_check_captcha(g_recaptcha_response: &str) -> bool {
+  // Any secrets reside in examples/config.json
+  let cortex_config = aux_load_config();
+  let captcha_secret = cortex_config.captcha_secret;
   let mut core = match Core::new() {
     Ok(c) => c,
     _ => return false,
@@ -802,7 +847,7 @@ fn aux_check_captcha(g_recaptcha_response: &str, captcha_secret: &str) -> bool {
 
   let mut verified = false;
   let url_with_query = "https://www.google.com/recaptcha/api/siteverify?secret=".to_string()
-    + captcha_secret + "&response=" + g_recaptcha_response;
+    + &captcha_secret + "&response=" + g_recaptcha_response;
   let json_str = format!(
     "{{\"secret\":\"{:?}\",\"response\":\"{:?}\"}}",
     captcha_secret, g_recaptcha_response
@@ -838,6 +883,33 @@ fn aux_check_captcha(g_recaptcha_response: &str, captcha_secret: &str) -> bool {
   }
 
   verified
+}
+
+fn aux_redis_get(key: &str) -> Option<String> {
+  match redis::Client::open("redis://127.0.0.1/") {
+    Err(_) => None,
+    Ok(redis_client) => match redis_client.get_connection() {
+      Err(_) => None,
+      Ok(redis_connection) => {
+        let value_result: Result<String, _> = redis_connection.get(key);
+        match value_result {
+          Ok(val) => Some(val),
+          _ => None,
+        }
+      },
+    },
+  }
+}
+
+fn aux_redis_set(key: &str, value: &str) -> redis::RedisResult<()> {
+  let redis_client = try!(redis::Client::open("redis://127.0.0.1/"));
+  let redis_connection = try!(redis_client.get_connection());
+  redis_connection.set(key, value).unwrap_or(());
+  Ok(())
+}
+
+fn aux_render_preview(service_name: &str, corpus_name: &str, entry_name: &str) -> String {
+  String::default()
 }
 
 fn aux_task_report(
